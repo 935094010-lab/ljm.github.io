@@ -1,0 +1,7 @@
+{
+  "name": "圣诞树",
+  "description": "A high-fidelity 3D interactive Christmas tree gallery controlled by AI hand gestures. Experience a memory gallery composed of thousands of particles.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

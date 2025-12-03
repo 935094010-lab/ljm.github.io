@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
+    <title>Lumina: AI Christmas Tree</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Lato:wght@300;400&display=swap" rel="stylesheet">
+    <style>
+      body { margin: 0; padding: 0; overflow: hidden; background-color: #050505; color: white; font-family: 'Lato', sans-serif; }
+      h1, h2, h3 { font-family: 'Cinzel', serif; }
+      ::-webkit-scrollbar { width: 6px; }
+      ::-webkit-scrollbar-track { background: #111; }
+      ::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
+      .fade-in { animation: fadeIn 1s ease-in; }
+      @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    </style>
+    
+    <!-- Import Map for dependencies -->
+    <script type="importmap">
+{
+  "imports": {
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "react-dom/client": "https://aistudiocdn.com/react-dom@^19.2.0/client",
+    "three": "https://aistudiocdn.com/three@^0.181.2",
+    "@react-three/fiber": "https://aistudiocdn.com/@react-three/fiber@^9.4.2",
+    "@react-three/drei": "https://aistudiocdn.com/@react-three/drei@^10.7.7",
+    "@react-three/postprocessing": "https://aistudiocdn.com/@react-three/postprocessing@^3.0.4",
+    "@mediapipe/tasks-vision": "https://aistudiocdn.com/@mediapipe/tasks-vision@^0.10.22-rc.20250304",
+    "maath": "https://aistudiocdn.com/maath@^0.10.8",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "react/": "https://aistudiocdn.com/react@^19.2.0/"
+  }
+}
+</script>
+    <!-- Babel for in-browser compilation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link rel="stylesheet" href="/index.css">
+</head>
+  <body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module" data-presets="react,typescript">
+      import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+      import { createRoot } from 'react-dom/client';
+      import * as THREE from 'three';
+      import { Canvas, useFrame } from '@react-three/fiber';
+      import { OrbitControls, Environment, PerspectiveCamera, PointMaterial, Image, Float, Sparkles, Box, Sphere } from '@react-three/drei';
+      import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
+      import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
+
+      // --- TYPES ---
+      
+      enum AppState {
+        LOADING = 'LOADING',
+        READY = 'READY',
+        RUNNING = 'RUNNING',
+        ERROR = 'ERROR'
+      }
+
+      enum ShapeMode {
+        TREE = 'TREE',
+        TEXT_1 = 'TEXT_1', // 圣诞快乐
+        TEXT_2 = 'TEXT_2', // 天天开心
+        TEXT_3 = 'TEXT_3', // 一切顺利
+      }
+
+      interface GestureState {
+        isDetected: boolean;
+        rotationSpeed: number;
+        dispersionFactor: number;
+        mode: ShapeMode;
+      }
+
+      // --- SERVICES ---
+
+      class GestureService {
+        private handLandmarker: HandLandmarker | null = null;
+        private video: HTMLVideoElement | null = null;
+        private lastVideoTime = -1;
+        private rafId: number | null = null;
+        private onResultCallback: ((result: any) => void) | null = null;
+
+        async initialize() {
+          try {
+            const vision = await FilesetResolver.forVisionTasks(
+              "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
+            );
+            
+            this.handLandmarker = await HandLandmarker.createFromOptions(vision, {
+              baseOptions: {
+                modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+                delegate: "GPU"
+              },
+              runningMode: "VIDEO",
+              numHands: 1
+            });
+          } catch (error) {
+            console.error("Failed to load MediaPipe:", error);
+            throw error;
+          }
+        }
+
+        async startWebcam(videoElement: HTMLVideoElement, onResult: (result: any) => void) {
+          if (!this.handLandmarker) throw new Error("HandLandmarker not initialized");
+
+          this.video = videoElement;
+          this.onResultCallback = onResult;
+
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: 640, height: 480, facingMode: "user" }
+          });
+
+          this.video.srcObject = stream;
+          this.video.addEventListener("loadeddata", () => {
+            this.predictWebcam();
+          });
+        }
+
+        stop() {
+          if (this.rafId) cancelAnimationFrame(this.rafId);
+          if (this.video && this.video.srcObject) {
+            const tracks = (this.video.srcObject as MediaStream).getTracks();
+            tracks.forEach(t => t.stop());
+            this.video.srcObject = null;
+          }
+        }
+
+        private predictWebcam = () => {
+          if (!this.handLandmarker || !this.video) return;
+          let startTimeMs = performance.now();
+          if (this.lastVideoTime !== this.video.currentTime) {
+            this.lastVideoTime = this.video.currentTime;
+            const results = this.handLandmarker.detectForVideo(this.video, startTimeMs);
+            if (this.onResultCallback) this.onResultCallback(results);
+          }
+          this.rafId = requestAnimationFrame(this.predictWebcam);
+        };
+      }
+
+      const gestureService = new GestureService();
+
+      // --- COMPONENTS: TREE PARTICLES ---
+
+      const COUNT = 45000;
+
+      const generateTextPositions = (text: string, count: number): Float32Array => {
+        const canvas = document.createElement('canvas');
+        const size = 128; 
+        canvas.width = size;
+        canvas.height = size / 2;
+        const ctx = canvas.getContext('2d');
+        
+        if (!ctx) return new Float32Array(count * 3);
+
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        ctx.fillStyle = '#ffffff';
+        // Using generic serif/sans-serif fallback for safety
+        ctx.font = 'bold 30px "Songti SC", "SimSun", "Times New Roman", serif'; 
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+        const validPixels: number[] = [];
+
+        for (let i = 0; i < canvas.width * canvas.height; i++) {
+          if (data[i * 4] > 128) validPixels.push(i);
+        }
+
+        const positions = new Float32Array(count * 3);
+        if (validPixels.length === 0) return positions;
+
+        for (let i = 0; i < count; i++) {
+          const pixelIndex = validPixels[i % validPixels.length];
+          const px = pixelIndex % canvas.width;
+          const py = Math.floor(pixelIndex / canvas.width);
+          const x = (px / canvas.width - 0.5) * 16;
+          const y = -(py / canvas.height - 0.5) * 8;
+          const z = (Math.random() - 0.5) * 2;
+          positions[i * 3] = x;
+          positions[i * 3 + 1] = y;
+          positions[i * 3 + 2] = z;
+        }
+        return positions;
+      };
+
+      const TreeParticlesWithRef = ({ gestureRef }: { gestureRef: React.MutableRefObject<GestureState> }) => {
+        const pointsRef = useRef<THREE.Points>(null);
+        
+        const { positions, originalPositions, text1Positions, text2Positions, text3Positions, colors } = useMemo(() => {
+          const pos = new Float32Array(COUNT * 3);
+          const orig = new Float32Array(COUNT * 3);
+          const col = new Float32Array(COUNT * 3);
+          
+          const color1 = new THREE.Color("#0f5f3f");
+          const color2 = new THREE.Color("#2fab6f");
+          const color3 = new THREE.Color("#d4af37");
+          
+          const height = 16;
+          const width = 6;
+
+          for (let i = 0; i < COUNT; i++) {
+              const yNorm = Math.pow(Math.random(), 0.8);
+              const y = (1 - yNorm) * height - (height / 2);
+              const rBase = yNorm * width;
+              const theta = i * 0.2 + Math.random() * 0.5;
+              const r = rBase * (0.6 + Math.random() * 0.4); 
+              const x = r * Math.cos(theta);
+              const z = r * Math.sin(theta);
+
+              pos[i*3] = x; pos[i*3+1] = y; pos[i*3+2] = z;
+              orig[i*3] = x; orig[i*3+1] = y; orig[i*3+2] = z;
+
+              const mix = Math.random();
+              let c = new THREE.Color();
+              if (mix > 0.95) c = color3; 
+              else c.lerpColors(color1, color2, Math.random());
+              
+              col[i*3] = c.r; col[i*3+1] = c.g; col[i*3+2] = c.b;
+          }
+
+          const txt1 = generateTextPositions("圣诞快乐", COUNT);
+          const txt2 = generateTextPositions("天天开心", COUNT);
+          const txt3 = generateTextPositions("一切顺利", COUNT);
+
+          return { 
+              positions: pos, 
+              originalPositions: orig, 
+              text1Positions: txt1,
+              text2Positions: txt2,
+              text3Positions: txt3,
+              colors: col 
+          };
+        }, []);
+
+        useFrame((state) => {
+          if (!pointsRef.current) return;
+          const t = state.clock.elapsedTime;
+          const posAttr = pointsRef.current.geometry.attributes.position;
+          const positionsArray = posAttr.array as Float32Array;
+          const { dispersionFactor, mode } = gestureRef.current;
+          
+          for (let i = 0; i < COUNT; i++) {
+            const ix = i * 3, iy = i * 3 + 1, iz = i * 3 + 2;
+            let tx = 0, ty = 0, tz = 0;
+            let lerpFactor = 0.08;
+
+            if (mode === ShapeMode.TREE) {
+                const ox = originalPositions[ix];
+                const oy = originalPositions[iy];
+                const oz = originalPositions[iz];
+                const spread = 1 + dispersionFactor * 6;
+                const breath = Math.sin(t * 2 + ox * 0.5) * 0.05 * (1 - dispersionFactor);
+                const floatY = Math.sin(t + ox * 10) * 3 * dispersionFactor;
+                const floatX = Math.cos(t * 0.5 + oy) * 2 * dispersionFactor;
+                const floatZ = Math.sin(t * 0.3 + oz) * 2 * dispersionFactor;
+
+                tx = ox * spread + floatX + (ox * breath);
+                ty = oy + floatY;
+                tz = oz * spread + floatZ + (oz * breath);
+            } else {
+                let targetArr = text1Positions;
+                if (mode === ShapeMode.TEXT_2) targetArr = text2Positions;
+                if (mode === ShapeMode.TEXT_3) targetArr = text3Positions;
+
+                const ox = targetArr[ix];
+                const oy = targetArr[iy];
+                const oz = targetArr[iz];
+                const noise = Math.sin(t * 3 + i) * 0.05;
+                
+                tx = ox + noise; ty = oy + noise; tz = oz;
+                lerpFactor = 0.1;
+            }
+
+            positionsArray[ix] += (tx - positionsArray[ix]) * lerpFactor;
+            positionsArray[iy] += (ty - positionsArray[iy]) * lerpFactor;
+            positionsArray[iz] += (tz - positionsArray[iz]) * lerpFactor;
+          }
+          posAttr.needsUpdate = true;
+          
+          if (mode === ShapeMode.TREE) {
+              pointsRef.current.rotation.y = Math.sin(t * 0.05) * 0.05;
+          } else {
+              pointsRef.current.rotation.y += (0 - pointsRef.current.rotation.y) * 0.1;
+          }
+        });
+
+        return (
+          <points ref={pointsRef}>
+            <bufferGeometry>
+              <bufferAttribute attach="attributes-position" count={positions.length / 3} array={positions} itemSize={3} />
+              <bufferAttribute attach="attributes-color" count={colors.length / 3} array={colors} itemSize={3} />
+            </bufferGeometry>
+            <PointMaterial transparent vertexColors size={0.08} sizeAttenuation depthWrite={false} blending={THREE.AdditiveBlending} opacity={0.9} />
+          </points>
+        );
+      };
+
+      // --- COMPONENTS: ORNAMENTS ---
+
+      const Gift = ({ position, color, gestureRef, delay }: any) => {
+        const ref = useRef(null);
+        const startPos = new THREE.Vector3(...position);
+        const dir = useMemo(() => new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).normalize(), []);
+
+        useFrame((state) => {
+          if (!ref.current) return;
+          const t = state.clock.elapsedTime;
+          const { dispersionFactor, mode } = gestureRef.current;
+          
+          if (mode !== ShapeMode.TREE) {
+              ref.current.scale.setScalar(THREE.MathUtils.lerp(ref.current.scale.x, 0, 0.1));
+              return;
+          }
+
+          const spreadDistance = 8 + (dispersionFactor * 20); 
+          const spread = startPos.clone().addScaledVector(dir, dispersionFactor * spreadDistance);
+          const floatY = Math.sin(t * 2 + delay) * 0.5;
+          
+          ref.current.position.lerp(new THREE.Vector3(spread.x, spread.y + floatY, spread.z), 0.1);
+          ref.current.rotation.x = Math.sin(t + delay) * 0.5;
+          ref.current.rotation.y += 0.01;
+          
+          const targetScale = 0.4 * (1 - dispersionFactor * 0.8);
+          ref.current.scale.setScalar(THREE.MathUtils.lerp(ref.current.scale.x, targetScale, 0.1));
+        });
+
+        return (
+          <group ref={ref} position={position} scale={0.4}>
+              <Box args={[1, 1, 1]}><meshStandardMaterial color={color} roughness={0.3} metalness={0.1} /></Box>
+              <Box args={[1.02, 0.2, 1.02]}><meshStandardMaterial color="#fff" emissive="#fff" emissiveIntensity={0.2} /></Box>
+              <Box args={[0.2, 1.02, 1.02]}><meshStandardMaterial color="#fff" emissive="#fff" emissiveIntensity={0.2} /></Box>
+          </group>
+        );
+      };
+
+      const Bauble = ({ position, color, gestureRef, delay }: any) => {
+          const ref = useRef(null);
+          const startPos = new THREE.Vector3(...position);
+          const dir = useMemo(() => new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).normalize(), []);
+        
+          useFrame((state) => {
+            if (!ref.current) return;
+            const t = state.clock.elapsedTime;
+            const { dispersionFactor, mode } = gestureRef.current;
+            
+            if (mode !== ShapeMode.TREE) {
+              ref.current.scale.setScalar(THREE.MathUtils.lerp(ref.current.scale.x, 0, 0.1));
+              return;
+            }
+
+            const spreadDistance = 5 + (dispersionFactor * 15);
+            const spread = startPos.clone().addScaledVector(dir, dispersionFactor * spreadDistance);
+            ref.current.position.lerp(spread, 0.1);
+            ref.current.position.y += Math.sin(t * 3 + delay) * 0.005;
+
+            const targetScale = 1 - dispersionFactor * 0.8;
+            ref.current.scale.setScalar(THREE.MathUtils.lerp(ref.current.scale.x, targetScale, 0.1));
+          });
+        
+          return (
+              <Sphere ref={ref} args={[0.25, 32, 32]} position={position}>
+                  <meshStandardMaterial color={color} roughness={0.1} metalness={0.8} />
+              </Sphere>
+          );
+      };
+
+      const SolidPolaroid = ({ url, position, rotation, gestureRef, index, total }: any) => {
+        const groupRef = useRef(null);
+        const startPos = useRef(new THREE.Vector3(...position));
+        const startRot = useRef(new THREE.Euler(...rotation));
+        const dummyObj = useMemo(() => new THREE.Object3D(), []);
+        const targetVec = useMemo(() => new THREE.Vector3(), []);
+        const smoothD = useRef(0);
+
+        useFrame((state, delta) => {
+          if (groupRef.current) {
+            const { dispersionFactor: rawD, mode } = gestureRef.current; 
+            
+            if (mode !== ShapeMode.TREE) {
+              groupRef.current.scale.setScalar(THREE.MathUtils.lerp(groupRef.current.scale.x, 0, delta * 5));
+              return;
+            }
+
+            smoothD.current = THREE.MathUtils.lerp(smoothD.current, rawD, delta * 3);
+            const d = smoothD.current;
+            const t = state.clock.elapsedTime;
+            const carouselRadius = 16; 
+            const carouselSpeed = 0.15; 
+            const theta = (index / total) * Math.PI * 2 + (t * carouselSpeed);
+            
+            const cx = Math.sin(theta) * carouselRadius;
+            const cz = Math.cos(theta) * carouselRadius;
+            const cy = THREE.MathUtils.lerp(startPos.current.y, Math.sin(index) * 2, d); 
+            const carouselPos = new THREE.Vector3(cx, cy, cz);
+            const mix = THREE.MathUtils.smoothstep(d, 0.1, 0.9);
+            
+            groupRef.current.position.lerpVectors(startPos.current, carouselPos, mix);
+
+            if (mix > 0.01) {
+                if (groupRef.current.parent) {
+                  targetVec.copy(state.camera.position);
+                  groupRef.current.parent.worldToLocal(targetVec);
+                  dummyObj.position.copy(groupRef.current.position);
+                  dummyObj.lookAt(targetVec);
+                  groupRef.current.quaternion.slerp(dummyObj.quaternion, delta * 4 * mix);
+                }
+            } else {
+                dummyObj.setRotationFromEuler(startRot.current);
+                groupRef.current.quaternion.slerp(dummyObj.quaternion, delta * 2);
+            }
+
+            let targetScale = 1;
+            if (mix > 0.01) {
+                const baseScale = 2.5; 
+                const zNorm = Math.cos(theta); 
+                const focusBoost = THREE.MathUtils.smoothstep(zNorm, 0.2, 1.0) * 2.5; 
+                targetScale = baseScale + focusBoost;
+            }
+            groupRef.current.scale.setScalar(THREE.MathUtils.lerp(groupRef.current.scale.x, targetScale, delta * 4));
+          }
+        });
+
+        return (
+          <group ref={groupRef} position={position} rotation={rotation}>
+            <Float speed={2} rotationIntensity={0.2} floatIntensity={0.5}>
+              <Box args={[1.2, 1.4, 0.05]} position={[0, 0, -0.025]}><meshStandardMaterial color="#f0f0f0" roughness={0.6} metalness={0.1} /></Box>
+              <Image url={url} position={[0, 0.1, 0.01]} scale={[1, 1]} />
+              <mesh position={[0, 0, -0.051]} rotation={[0, Math.PI, 0]}><planeGeometry args={[1.1, 1.3]} /><meshStandardMaterial color="#e0e0e0" roughness={0.9} /></mesh>
+            </Float>
+          </group>
+        );
+      };
+
+      const Ornaments = ({ photoUrls, gestureRef }: any) => {
+        const photos = useMemo(() => {
+          return photoUrls.map((url, i) => {
+            const theta = (i / photoUrls.length) * Math.PI * 10; 
+            const y = (i / photoUrls.length) * 12 - 6;
+            const r = (1 - (y + 7) / 16) * 5 + 1.2; 
+            const x = Math.cos(theta) * r;
+            const z = Math.sin(theta) * r;
+            return { url, position: [x, y, z], rotation: [0, -theta + Math.PI / 2, 0] };
+          });
+        }, [photoUrls]);
+
+        const decorations = useMemo(() => {
+          const items = [];
+          const colors = ["#d32f2f", "#1976d2", "#fbc02d", "#7b1fa2", "#388e3c"];
+          for(let i=0; i<40; i++) {
+              const y = (Math.random() * 14) - 7;
+              const rBase = (1 - (y + 7) / 16) * 5; 
+              const r = rBase * (0.5 + Math.random() * 0.5); 
+              const theta = Math.random() * Math.PI * 2;
+              items.push({ type: 'gift', position: [Math.cos(theta) * r, y, Math.sin(theta) * r], color: colors[Math.floor(Math.random() * colors.length)], delay: Math.random() * 10 });
+          }
+          for(let i=0; i<60; i++) {
+              const y = (Math.random() * 14) - 7;
+              const rBase = (1 - (y + 7) / 16) * 5; 
+              const r = rBase * (0.8 + Math.random() * 0.3); 
+              const theta = Math.random() * Math.PI * 2;
+              items.push({ type: 'bauble', position: [Math.cos(theta) * r, y, Math.sin(theta) * r], color: colors[Math.floor(Math.random() * colors.length)], delay: Math.random() * 10 });
+          }
+          return items;
+        }, []);
+
+        return (
+          <group>
+              <Sparkles count={500} scale={20} size={3} speed={0.4} opacity={0.6} color="#ffffff" />
+              <Sparkles count={300} scale={15} size={5} speed={0.2} opacity={0.8} color="#ffd700" noise={0.5} />
+              {photos.map((p, i) => <SolidPolaroid key={`photo-${i}`} {...p} gestureRef={gestureRef} index={i} total={photos.length} />)}
+              {decorations.map((d, i) => (d.type === 'gift' ? <Gift key={`gift-${i}`} position={d.position} color={d.color} gestureRef={gestureRef} delay={d.delay} /> : <Bauble key={`bauble-${i}`} position={d.position} color={d.color} gestureRef={gestureRef} delay={d.delay} />))}
+          </group>
+        );
+      };
+
+      // --- COMPONENTS: SCENE ---
+
+      const Scene = ({ gestureState, photoUrls }: any) => {
+        const groupRef = useRef(null);
+        const smoothRotation = useRef(0);
+
+        useFrame((state, delta) => {
+          if (!groupRef.current) return;
+          const { rotationSpeed, mode } = gestureState.current;
+          smoothRotation.current = THREE.MathUtils.lerp(smoothRotation.current, rotationSpeed, delta * 3);
+          const baseRotation = mode === ShapeMode.TREE ? 0.05 * delta : 0;
+          const gestureRotation = smoothRotation.current * 2 * delta; 
+          groupRef.current.rotation.y += baseRotation + gestureRotation;
+        });
+
+        // Helper to pass refs cleanly
+        const TreeWrapper = () => <TreeParticlesWithRef gestureRef={gestureState} />;
+        const OrnamentsWrapper = () => {
+             const ref = useRef(null);
+             useFrame((_, delta) => {
+                 if (ref.current) {
+                      const { dispersionFactor, mode } = gestureState.current;
+                      const targetScale = mode === ShapeMode.TREE ? 1 + dispersionFactor * 1.5 : 1; 
+                      ref.current.scale.lerp(new THREE.Vector3(targetScale, targetScale, targetScale), delta * 2);
+                      if (mode === ShapeMode.TREE) ref.current.rotation.y -= 0.002;
+                 }
+             });
+             return <group ref={ref}><Ornaments photoUrls={photoUrls} gestureRef={gestureState} /></group>
+        }
+
+        return (
+          <div className="w-full h-full relative bg-[#050505]">
+            <Canvas dpr={[1, 2]} gl={{ antialias: false, toneMapping: THREE.ReinhardToneMapping, toneMappingExposure: 1.8 }}>
+              <PerspectiveCamera makeDefault position={[0, 0, 24]} fov={50} />
+              <group ref={groupRef}>
+                <TreeWrapper />
+                <OrnamentsWrapper />
+              </group>
+              
+              <ambientLight intensity={0.1} />
+              <pointLight position={[0, 2, 20]} intensity={0.5} color="#fff" distance={40} decay={1} />
+              <pointLight position={[10, 10, 10]} intensity={1.5} color="#ffaa00" distance={50} decay={2} />
+              <pointLight position={[-10, 5, -10]} intensity={1} color="#ff0000" distance={50} decay={2} />
+              <pointLight position={[0, -10, 5]} intensity={0.8} color="#0000ff" distance={50} decay={2} />
+              <spotLight position={[0, 20, 0]} angle={0.5} penumbra={1} intensity={2} castShadow color="#fff" />
+              <Environment preset="night" />
+
+              <EffectComposer disableNormalPass>
+                  <Bloom luminanceThreshold={0.4} mipmapBlur intensity={1.2} radius={0.4} levels={8} />
+                  <Vignette eskil={false} offset={0.1} darkness={1.0} />
+              </EffectComposer>
+              
+              <OrbitControls enableZoom={true} enablePan={false} maxPolarAngle={Math.PI / 1.5} minPolarAngle={Math.PI / 3} maxDistance={40} minDistance={10} />
+            </Canvas>
+          </div>
+        );
+      };
+
+      // --- COMPONENTS: UI ---
+
+      const UI = ({ appState, onStart, onUpload, videoRef }: any) => {
+        const fileInputRef = useRef(null);
+
+        return (
+          <div className="absolute inset-0 pointer-events-none z-10 flex flex-col justify-between p-6">
+            <input type="file" multiple accept="image/*" ref={fileInputRef} className="hidden" onChange={onUpload} onClick={(e) => (e.currentTarget.value = '')} />
+
+            <header className="flex justify-between items-start pointer-events-auto">
+              <div>
+                <h1 className="text-4xl md:text-6xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-amber-200 to-yellow-500 drop-shadow-lg tracking-wider">LUMINA</h1>
+                <p className="text-amber-100/60 text-sm md:text-base mt-2 font-light tracking-widest uppercase">Interactive Holiday Memory Gallery</p>
+              </div>
+              
+              <div className="flex flex-col items-end gap-2">
+                  <div className={`relative overflow-hidden rounded-lg border border-amber-500/30 transition-opacity duration-500 ${appState === AppState.RUNNING ? 'opacity-100' : 'opacity-0'}`}>
+                      <video ref={videoRef} className="w-32 h-24 object-cover transform scale-x-[-1]" autoPlay playsInline muted />
+                      <div className="absolute bottom-0 w-full bg-black/50 text-[10px] text-center text-white py-1">AI Vision Active</div>
+                  </div>
+                  {appState === AppState.RUNNING && (
+                      <button onClick={() => fileInputRef.current?.click()} className="mt-2 px-4 py-2 bg-amber-900/50 hover:bg-amber-800/80 active:scale-95 text-amber-100 text-xs border border-amber-500/30 rounded backdrop-blur-sm transition-all shadow-lg">+ Add Photos</button>
+                  )}
+              </div>
+            </header>
+
+            <main className="flex-1 flex items-center justify-center pointer-events-auto">
+              {appState === AppState.READY && (
+                <div className="text-center bg-black/60 backdrop-blur-md p-8 rounded-2xl border border-amber-500/20 shadow-2xl animate-fade-in flex flex-col gap-4">
+                  <h2 className="text-2xl text-amber-100 mb-2 font-serif">Welcome to the Gallery</h2>
+                  <p className="text-gray-300 mb-4 max-w-md mx-auto">Enable your camera to interact with the tree or upload your own memories to customize the gallery.</p>
+                  <div className="flex flex-col md:flex-row gap-4 justify-center">
+                      <button onClick={onStart} className="px-8 py-3 bg-gradient-to-r from-amber-600 to-amber-800 hover:from-amber-500 hover:to-amber-700 active:scale-95 text-white font-bold rounded-full transition-all transform shadow-lg ring-2 ring-amber-500/50 flex items-center justify-center gap-2">Open Camera</button>
+                      <button onClick={() => fileInputRef.current?.click()} className="px-8 py-3 bg-transparent hover:bg-white/10 active:scale-95 text-amber-200 border border-amber-500/50 font-bold rounded-full transition-all flex items-center justify-center gap-2">Upload Photos</button>
+                  </div>
+                </div>
+              )}
+              {appState === AppState.LOADING && (
+                <div className="flex flex-col items-center">
+                  <div className="w-12 h-12 border-4 border-amber-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+                  <p className="text-amber-200 tracking-widest text-sm">INITIALIZING AI MODELS...</p>
+                </div>
+              )}
+              {appState === AppState.ERROR && (
+                 <div className="text-center bg-red-900/80 p-6 rounded-xl border border-red-500/50">
+                   <h3 className="text-white font-bold text-lg mb-2">System Error</h3>
+                   <p className="text-red-200">Could not access camera or load AI models.</p>
+                 </div>
+              )}
+            </main>
+
+            <footer className={`transition-opacity duration-1000 ${appState === AppState.RUNNING ? 'opacity-100' : 'opacity-0'}`}>
+              <div className="flex flex-col md:flex-row gap-4 justify-center md:justify-start items-center text-xs text-amber-100/50 font-mono">
+                 <div className="flex items-center gap-2"><span className="w-2 h-2 bg-amber-500 rounded-full animate-pulse"></span><span>GESTURE CONTROL ACTIVE</span></div>
+                 <div className="hidden md:block">|</div><div>OPEN PALM: DISPERSE</div>
+                 <div className="hidden md:block">|</div><div>FINGERS 1/2/3: SHOW TEXT</div>
+              </div>
+            </footer>
+          </div>
+        );
+      };
+
+      // --- APP ROOT ---
+
+      const DEFAULT_PHOTOS = [
+        "https://picsum.photos/id/1015/300/300", "https://picsum.photos/id/1018/300/300", "https://picsum.photos/id/1025/300/300",
+        "https://picsum.photos/id/1035/300/300", "https://picsum.photos/id/1040/300/300", "https://picsum.photos/id/1050/300/300",
+        "https://picsum.photos/id/1062/300/300", "https://picsum.photos/id/1074/300/300", "https://picsum.photos/id/237/300/300",
+        "https://picsum.photos/id/238/300/300", "https://picsum.photos/id/239/300/300", "https://picsum.photos/id/240/300/300",
+      ];
+
+      const App = () => {
+        const [appState, setAppState] = useState(AppState.LOADING);
+        const [photos, setPhotos] = useState(DEFAULT_PHOTOS);
+        const videoRef = useRef(null);
+        
+        const gestureStateRef = useRef({ isDetected: false, rotationSpeed: 0, dispersionFactor: 0, mode: ShapeMode.TREE });
+
+        useEffect(() => {
+          const init = async () => {
+            try {
+              await gestureService.initialize();
+              setAppState(AppState.READY);
+            } catch (err) {
+              console.error(err);
+              setAppState(AppState.ERROR);
+            }
+          };
+          init();
+          return () => gestureService.stop();
+        }, []);
+
+        const handleGestureResult = useCallback((result) => {
+          const hands = result.landmarks;
+          if (hands && hands.length > 0) {
+            const hand = hands[0];
+            const isIndexUp = hand[8].y < hand[6].y;
+            const isMiddleUp = hand[12].y < hand[10].y;
+            const isRingUp = hand[16].y < hand[14].y;
+            const isPinkyUp = hand[20].y < hand[18].y;
+            
+            let currentMode = ShapeMode.TREE;
+            if (isIndexUp && !isMiddleUp && !isRingUp && !isPinkyUp) currentMode = ShapeMode.TEXT_1;
+            else if (isIndexUp && isMiddleUp && !isRingUp && !isPinkyUp) currentMode = ShapeMode.TEXT_2;
+            else if (isIndexUp && isMiddleUp && isRingUp && !isPinkyUp) currentMode = ShapeMode.TEXT_3;
+            else if (isIndexUp && isMiddleUp && isRingUp && isPinkyUp) currentMode = ShapeMode.TREE;
+
+            const thumbTip = hand[4];
+            const indexTip = hand[8];
+            const distance = Math.sqrt(Math.pow(thumbTip.x - indexTip.x, 2) + Math.pow(thumbTip.y - indexTip.y, 2));
+            const normalizedOpenness = Math.min(Math.max((distance - 0.05) * 6, 0), 1);
+            const handCentroidX = (hand[0].x + hand[9].x) / 2;
+            const rotationInput = (handCentroidX - 0.5) * -2; 
+            
+            gestureStateRef.current = { isDetected: true, rotationSpeed: rotationInput, dispersionFactor: normalizedOpenness, mode: currentMode };
+          } else {
+            gestureStateRef.current = { ...gestureStateRef.current, isDetected: false, mode: ShapeMode.TREE, dispersionFactor: Math.max(0, gestureStateRef.current.dispersionFactor - 0.05) };
+          }
+        }, []);
+
+        const startExperience = async () => {
+          if (!videoRef.current) return;
+          try {
+            await gestureService.startWebcam(videoRef.current, handleGestureResult);
+            setAppState(AppState.RUNNING);
+          } catch (err) {
+            setAppState(AppState.ERROR);
+          }
+        };
+
+        const handlePhotoUpload = async (event) => {
+          const files = event.target.files;
+          if (!files || files.length === 0) return;
+          const fileArray = Array.from(files);
+          const loadPromises = fileArray.map(file => new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = (e) => e.target?.result ? resolve(e.target.result) : reject(new Error("Failed"));
+              reader.readAsDataURL(file);
+          }));
+          try {
+            const newPhotoUrls = await Promise.all(loadPromises);
+            setPhotos(prev => {
+              const isDefaultSet = prev.length === DEFAULT_PHOTOS.length && prev[0] === DEFAULT_PHOTOS[0];
+              return isDefaultSet ? newPhotoUrls : [...prev, ...newPhotoUrls];
+            });
+          } catch (error) { console.error(error); }
+        };
+
+        return (
+          <div className="w-full h-screen bg-black relative overflow-hidden">
+            <div className="absolute inset-0 z-0"><Scene gestureState={gestureStateRef} photoUrls={photos} /></div>
+            <UI appState={appState} onStart={startExperience} onUpload={handlePhotoUpload} videoRef={videoRef} />
+          </div>
+        );
+      };
+
+      const root = createRoot(document.getElementById('root'));
+      root.render(<App />);
+    </script>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>
